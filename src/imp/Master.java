@@ -1,7 +1,6 @@
 package imp;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Scanner;
 import java.util.regex.Pattern;
@@ -20,12 +19,17 @@ public class Master extends Thread{
 	private List<Job> jobs;
 	private List<Thread> threads;
 	private String[] words;
+	private long ramAvailable;
 	
-	public Master() throws SigarException{
+	public Master() throws SigarException, InterruptedException{
 		sc = new Scanner(System.in);
 		rd = new RamData(new Sigar());
 		jobs = new ArrayList<Job>();
 		threads = new ArrayList<Thread>();
+		rd.startMetricTest();
+		setRamAvailable(Long.parseLong(rd.getFreeMemory())/100*80);
+		
+		System.out.println(getRamAvailable());
 	}
 	
 	public void run(){
@@ -44,19 +48,18 @@ public class Master extends Thread{
 					break;
 				default: System.err.println("unknown command...");
 				}
-				displayThreads();
+				//displayThreads();
 			}
 		} catch (Exception e) {
 			e.printStackTrace();
 		}
 	}
 	
-	private void displayThreads() {
+	/*private void displayThreads() {
 		for(Thread t : threads){
 			System.out.println(t.getId() + " " + t.getState());
-		}
-		
-	}
+		}	
+	}*/
 
 	private int analyseLine() throws Exception {
 		String line = sc.nextLine();
@@ -64,35 +67,28 @@ public class Master extends Thread{
 			return -1;
 		
 		words = line.split(" ");
-
-		/*for(int i=0;i<words.length;i++)
-			System.out.println(words[i] + " ");*/
 		
 		if(line.equals("exit")){
-			System.out.println("############## end of the Master ##############");
+			System.out.println("############## Cluster stopped ##############");
 			return 0;
 		}
-		else if(line.equals("list")){
-			System.out.println("List of jobs:");
+		else if(line.equals("list"))
 			return 1;
-		}
-		else if(words[0].equals("launch")){
-			System.out.println("Launching a job");
+		
+		else if(words[0].equals("launch"))
 			return 2;
-		}
-		else if(words[0].equals("kill")){
-			System.out.println("Killing of job...");
+		
+		else if(words[0].equals("kill"))
 			return 3;
-		}
-		else{
-			System.err.println("unknown command...");
-			return -1;
-		}
+		
+		
+		return -1;
 	}
 	
 	private void createJob(String[] words) throws Exception {
 		if(testLaunchArgs(words)){
 			Job j = addJob(words);
+			System.out.println(words[0] + " is waiting to be launched...");
 			if(enoughtRAM(words[3]))
 				launchJob(j);
 			else
@@ -109,13 +105,21 @@ public class Master extends Thread{
 	}
 
 	@SuppressWarnings("deprecation")
-	private void killJob(String name) throws InterruptedException {
+	private void killJob(String name) throws Exception {
+		if(name.isEmpty()){
+			System.err.println("Missing name...");
+			return;
+		}
+		
 		for(Job j : jobs){
 			if(j.getName().equals(name)){
 				j.setState(model.State.Stoped);
 				for(Thread t : threads){
 					if(t.getName().equals(name)){
-							t.stop();						
+							t.stop();	
+							System.out.println("@ " + name + " is stopped!");
+							setRamAvailable(getRamAvailable()+j.getRam());
+							searchJob();
 					}
 				}
 					
@@ -123,17 +127,42 @@ public class Master extends Thread{
 		}
 	}
 
+	private void searchJob() throws Exception{
+		for(Job j : jobs){
+			if(j.getState().equals(model.State.Wainting)){ 
+				if(enoughtRAM(Long.toString(j.getRam())))
+					launchJob(j);
+			}
+		}
+	}
+
 	private void jobList() {
-		// TODO Auto-generated method stub
-		
+		System.out.println("======================");
+		System.out.println("List of Cluster jobs: ");
+		System.out.println("----------------------");
+		for(Job j: jobs){
+			System.out.println(j.getName() + " : " + j.getState());
+		}
+		System.out.println("----------------------");
+		System.out.println("RAM available = " + getRamAvailable());
+		System.out.println("======================");
+
 	}
 
 	private void launchJob(Job j) {
+		System.out.println("@ Launching " + j.getName() + " ...");
+		j.setState(model.State.Running);
 		Thread t = new Thread(new Runnable() {			
 			public void run() {
 					try {
 						Thread.sleep(Long.parseLong(j.getTime())*1000);
+						j.setState(model.State.Finished);
+						System.out.println("@ " + j.getName() + " finished.");
+						setRamAvailable(getRamAvailable()+j.getRam());
+						searchJob();
 					} catch (InterruptedException e) {
+						e.printStackTrace();
+					} catch (Exception e) {
 						e.printStackTrace();
 					}
 				
@@ -143,20 +172,23 @@ public class Master extends Thread{
 		threads.add(t);		
 		t.start();
 	}
-
-	private long currentMemory() throws Exception{
-		rd.startMetricTest();
-		return Long.parseLong(rd.getFreeMemory());
-	}
 	
 	private boolean enoughtRAM(String ram) throws Exception{
-		if(currentMemory() - Long.parseLong(ram) > 0)
+		long tmp = getRamAvailable() - Long.parseLong(ram);
+		if(tmp > 0){
+			setRamAvailable(tmp);
 			return true;
+		}
 		return false;
 	}
 
-	private boolean testLaunchArgs(String[] words) {
-		String regexJobName = "^[a-zA-Z]{3,10}";
+	private boolean testLaunchArgs(String[] words) throws Exception{
+		if(words.length != 4){
+			System.err.println("@ Missing arguments...");
+			return false;
+		}
+		
+		String regexJobName = "^[a-zA-Z0-9]{3,10}";
 		if(!Pattern.matches(regexJobName, words[1])){
 			System.err.println("invalid job name");
 			return false;
@@ -177,6 +209,12 @@ public class Master extends Thread{
 		return true;
 	}
 
-	
+	public long getRamAvailable() {
+		return ramAvailable;
+	}
+
+	public void setRamAvailable(long ramAvailable) {
+		this.ramAvailable = ramAvailable;
+	}
 
 }
